@@ -72,9 +72,9 @@ set_gpg_recipients() {
 	GPG_RECIPIENTS=( )
 
 	if [[ -n $PASSWORD_STORE_KEY ]]; then
-		for gpg_id in $PASSWORD_STORE_KEY; do
-			GPG_RECIPIENT_ARGS+=( "-r" "$gpg_id" )
-			GPG_RECIPIENTS+=( "$gpg_id" )
+		for gpg_pubkey in $PASSWORD_STORE_KEY; do
+			GPG_RECIPIENT_ARGS+=( "-r" "$gpg_pubkey!" )
+			GPG_RECIPIENTS+=( "$gpg_pubkey" )
 		done
 		return
 	fi
@@ -88,7 +88,7 @@ set_gpg_recipients() {
 	if [[ ! -f $current ]]; then
 		cat >&2 <<-_EOF
 		Error: You must run:
-		    $PROGRAM init your-gpg-id
+		    $PROGRAM init your-gpg-pubkey [your-gpg-pubkey2 [your-gpg-pubkey3 ... ]]
 		before you may use the password store.
 
 		_EOF
@@ -98,10 +98,10 @@ set_gpg_recipients() {
 
 	verify_file "$current"
 
-	local gpg_id
-	while read -r gpg_id; do
-		GPG_RECIPIENT_ARGS+=( "-r" "$gpg_id" )
-		GPG_RECIPIENTS+=( "$gpg_id" )
+	local gpg_pubkey
+	while read -r gpg_pubkey; do
+		GPG_RECIPIENT_ARGS+=( "-r" "$gpg_pubkey!" )
+		GPG_RECIPIENTS+=( "$gpg_pubkey" )
 	done < "$current"
 }
 
@@ -130,7 +130,7 @@ reencrypt_path() {
 		current_keys="$(LC_ALL=C $GPG $PASSWORD_STORE_GPG_OPTS -v --no-secmem-warning --no-permission-warning --decrypt --list-only --keyid-format long "$passfile" 2>&1 | sed -n 's/^gpg: public key is \([A-F0-9]\+\)$/\1/p' | LC_ALL=C sort -u)"
 
 		if [[ $gpg_keys != "$current_keys" ]]; then
-			echo "$passfile_display: reencrypting to ${gpg_keys//$'\n'/ }"
+			echo "$passfile_display: reencrypting for (pubkey) recipients ${GPG_RECIPIENTS[@]}"
 			$GPG -d "${GPG_OPTS[@]}" "$passfile" | $GPG -e "${GPG_RECIPIENT_ARGS[@]}" -o "$passfile_temp" "${GPG_OPTS[@]}" &&
 			mv "$passfile_temp" "$passfile" || rm -f "$passfile_temp"
 		fi
@@ -275,9 +275,9 @@ cmd_usage() {
 	echo
 	cat <<-_EOF
 	Usage:
-	    $PROGRAM init [--path=subfolder,-p subfolder] gpg-id...
-	        Initialize new password storage and use gpg-id for encryption.
-	        Selectively reencrypt existing passwords using new gpg-id.
+	    $PROGRAM init [--path=subfolder,-p subfolder] gpg-pubkey [gpg-pubkey2 [gpg-pubkey3 ...]]
+		Initialize new password storage and use gpg-pubkey(s) as recipient(s) for the encryption.
+	        Selectively reencrypt existing passwords using new gpg-pubkey.
 	    $PROGRAM [ls] [subfolder]
 	        List passwords.
 	    $PROGRAM find pass-names...
@@ -326,36 +326,36 @@ cmd_init() {
 		--) shift; break ;;
 	esac done
 
-	[[ $err -ne 0 || $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [--path=subfolder,-p subfolder] gpg-id..."
+	[[ $err -ne 0 || $# -lt 1 ]] && die "Usage: $PROGRAM $COMMAND [--path=subfolder,-p subfolder] gpg-pubkey [gpg-pubkey2 [gpg-pubkey3 ... ]]"
 	[[ -n $id_path ]] && check_sneaky_paths "$id_path"
 	[[ -n $id_path && ! -d $PREFIX/$id_path && -e $PREFIX/$id_path ]] && die "Error: $PREFIX/$id_path exists but is not a directory."
 
-	local gpg_id="$PREFIX/$id_path/.gpg-id"
-	set_git "$gpg_id"
+	local gpg_pubkey="$PREFIX/$id_path/.gpg-id"
+	set_git "$gpg_pubkey"
 
 	if [[ $# -eq 1 && -z $1 ]]; then
-		[[ ! -f "$gpg_id" ]] && die "Error: $gpg_id does not exist and so cannot be removed."
-		rm -v -f "$gpg_id" || exit 1
+		[[ ! -f "$gpg_pubkey" ]] && die "Error: $gpg_pubkey does not exist and so cannot be removed."
+		rm -v -f "$gpg_pubkey" || exit 1
 		if [[ -n $INNER_GIT_DIR ]]; then
-			git -C "$INNER_GIT_DIR" rm -qr "$gpg_id"
-			git_commit "Deinitialize ${gpg_id}${id_path:+ ($id_path)}."
+			git -C "$INNER_GIT_DIR" rm -qr "$gpg_pubkey"
+			git_commit "Deinitialize ${gpg_pubkey}${id_path:+ ($id_path)}."
 		fi
-		rmdir -p "${gpg_id%/*}" 2>/dev/null
+		rmdir -p "${gpg_pubkey%/*}" 2>/dev/null
 	else
 		mkdir -v -p "$PREFIX/$id_path"
-		printf "%s\n" "$@" > "$gpg_id"
+		printf "%s\n" "$@" > "$gpg_pubkey"
 		local id_print="$(printf "%s, " "$@")"
 		echo "Password store initialized for ${id_print%, }${id_path:+ ($id_path)}"
-		git_add_file "$gpg_id" "Set GPG id to ${id_print%, }${id_path:+ ($id_path)}."
+		git_add_file "$gpg_pubkey" "Set GPG key(s) to ${id_print%, }${id_path:+ ($id_path)}."
 		if [[ -n $PASSWORD_STORE_SIGNING_KEY ]]; then
 			local signing_keys=( ) key
 			for key in $PASSWORD_STORE_SIGNING_KEY; do
 				signing_keys+=( --default-key $key )
 			done
-			$GPG "${GPG_OPTS[@]}" "${signing_keys[@]}" --detach-sign "$gpg_id" || die "Could not sign .gpg_id."
-			key="$($GPG --verify --status-fd=1 "$gpg_id.sig" "$gpg_id" 2>/dev/null | sed -n 's/^\[GNUPG:\] VALIDSIG [A-F0-9]\{40\} .* \([A-F0-9]\{40\}\)$/\1/p')"
-			[[ -n $key ]] || die "Signing of .gpg_id unsuccessful."
-			git_add_file "$gpg_id.sig" "Signing new GPG id with ${key//[$IFS]/,}."
+			$GPG "${GPG_OPTS[@]}" "${signing_keys[@]}" --detach-sign "$gpg_pubkey" || die "Could not sign .gpg_pubkey."
+			key="$($GPG --verify --status-fd=1 "$gpg_pubkey.sig" "$gpg_pubkey" 2>/dev/null | sed -n 's/^\[GNUPG:\] VALIDSIG [A-F0-9]\{40\} .* \([A-F0-9]\{40\}\)$/\1/p')"
+			[[ -n $key ]] || die "Signing of .gpg_pubkey unsuccessful."
+			git_add_file "$gpg_pubkey.sig" "Signing new GPG id with ${key//[$IFS]/,}."
 		fi
 	fi
 
